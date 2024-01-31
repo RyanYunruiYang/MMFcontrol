@@ -1,74 +1,19 @@
+from waterfilling import waterfilling
 import numpy as np
-import math
+import random
 
-def max_index(list1):
-    max_value = max(list1)
-    max_index = list1.index(max_value)
-    return max_index
+def debug(s):
+    if(False):
+        print(s)
 
-def waterfilling(users, RTTs, resources, incidence_matrix):
-    """
-    Perform water-filling for Max-Min fairness.
-
-    :param users: Dictionary with weights for each user.
-    :param resources: Dictionary with limits for each resource.
-    :param incidence_matrix: NumPy array representing the incidence matrix.
-    :return: Dictionary with throughput for each user.
-    """
-    print(f"MMF: users {users}")
-    user_weights = [users[i]/RTTs[i] for i in range(len(users))]
-
-    resource_caps = list(resources.values())
-    allocation = [0 for i in range(len(users))]
-    user_frozen = [False for i in range(len(users))]
-    resource_frozen = [False for i in range(len(resources))]
-
-    print(f"MMF: user_weights: {user_weights}")
-    print(f"MMF: resource_caps: {resource_caps}")
-    # print(f"allocation: {allocation}")
-    # print(f"user_frozen: {user_frozen}")
-    # print(f"resource_frozen: {resource_frozen}")
-
-
-    while not all(user_frozen) and not all(resource_frozen):
-        # print("newround")
-        available_resources = [resource_caps[i] for i in range(len(resources))]
-        resource_demand = [0 for i in range(len(resources))]
-        
-        for i in range(len(users)): 
-            for j in range(len(resources)):
-                if (incidence_matrix[i][j] == 1):
-                    available_resources[j] -= allocation[i]
-                    if (not user_frozen[i]):
-                        resource_demand[j] += user_weights[i]
-
-        # print(f"available_resources: {available_resources}")
-        # print(f"resource_demand: {resource_demand}")
-
-
-        next_resource_index = -1
-        next_resource_step = np.infty
-        for i in range(len(resources)):
-            if (not resource_frozen[i]):
-                ratio = available_resources[i]/resource_demand[i]
-                if (ratio > 0 and ratio < next_resource_step):
-                    next_resource_step = ratio
-                    next_resource_index = i
-        # print(f"next_resource_step: {next_resource_step}")
-        # print(f"next_resource_index: {next_resource_index}")
-
-        for i in range(len(users)):
-            if (not user_frozen[i]):
-                allocation[i] += user_weights[i] * next_resource_step
-
-
-        resource_frozen[next_resource_index] = True 
-        for i in range(len(users)):
-            if (incidence_matrix[i][next_resource_index]):
-                user_frozen[i ] = True
-
-    return allocation
-
+# Stochastic Rounding of any number into floor(x) and ceil(x) 
+def stochastic_round(x):
+    floor_x = int(x)
+    ceil_x = floor_x + 1
+    if (random.random() < (x - floor_x)):
+        return ceil_x
+    else:
+        return floor_x
 
 class WorldModel:
     def __init__(self, RTTs, resources, incidence_matrix):
@@ -77,8 +22,9 @@ class WorldModel:
         self.incidence_matrix = incidence_matrix
 
     def tput(self, n):
-        print(f"n: {n}")
-        return waterfilling(n, self.RTTs, self.resources, self.incidence_matrix)
+        debug(f"n: {n}")
+        weights = [n[i]/self.RTTs[i] for i in range(len(n))]
+        return waterfilling(weights, self.resources, self.incidence_matrix)
 
 
 class Optimizer:
@@ -89,31 +35,66 @@ class Optimizer:
         self.resource_caps = list(resources.values())        
 
     def update(self, throughput, n):
-        delta_n = [0 for _ in n]
+        delta_n = [{'value': 0, 'priority': 0} for _ in n]
 
         resource_util = [0 for i in range(len(self.resources))]
         for i in range(len(throughput)):
             for j in range(len(self.resources)):
                 if (self.incidence_matrix[i][j] == 1):
                     resource_util[j] += throughput[i]
-        print(f"resource_util: {resource_util}")
-        print(f"self.resource_caps: {self.resource_caps}")
+        debug(f"resource_util: {resource_util}")
+        # debug(f"self.resource_caps: {self.resource_caps}")
 
         for j in range(len(self.resources)):
-            if ( abs(resource_util[j]-self.resource_caps[j]) < 0.001):
-                tputs = []
+            # With probability 80% we remove a connection from the largest flow,
+            # with probability 20% we scale up all connections by 10%
+
+            # If the sum of n on the resource is greater than 50, we scale down
+            # Compute the sum of n on the resource
+            sum_n = 0
+            for i in range(len(n)):
+                if (self.incidence_matrix[i][j] == 1):
+                    sum_n += n[i]
+
+            action = 0
+            if (sum_n < 10):
+                action = 1
+            if (sum_n > 100):
+                action = 3
+            if (sum_n >= 10 and sum_n <= 50):
+                if (random.random() < 0.95):
+                    action = 2
+                else:
+                    action = 1
+            if (action == 1):
+                for i in range(len(n)):
+                    if (action > delta_n[i]['priority']):
+                        delta_n[i]['value'] = stochastic_round(n[i] * 0.1)
+                        delta_n[i]['priority'] = action
+            
+            if (action == 2):
+                tputs = {}
                 for i in range(len(throughput)):
                     if (self.incidence_matrix[i][j] == 1):
-                        tputs.append(throughput[i] / self.ideal_weights[i])
+                        tputs[i] = throughput[i] / self.ideal_weights[i]
                 print(f"tputs: {tputs}")
 
-                delta_n[max_index(tputs)] = -1
+                index = max(tputs, key=tputs.get)
+                if (action > delta_n[index]['priority']):
+                    delta_n[index]['value'] = -1    
+                    delta_n[index]['priority'] = action
+            
+            if (action == 3):
+                for i in range(len(n)):
+                    delta_n[i]['value'] = -stochastic_round(n[i] * 0.1)
+                    delta_n[i]['priority'] = action
 
 
         print(delta_n)
         for i in range(len(n)):
-            n[i] += delta_n[i]
-
+            n[i] += delta_n[i]['value']
+            if (n[i] <= 2):
+                n[i] = 3
 
         return n
 
@@ -137,8 +118,8 @@ def main():
         [0, 1, 1]   # User C uses R2, R3
     ])
 
-    ideal_weights = [9.01, 1, 1]
-    goal = waterfilling(ideal_weights, [1,1,1], resources, incidence_matrix)
+    ideal_weights = [10, 1, 1]
+    goal = waterfilling(ideal_weights, resources, incidence_matrix)
     print(f"GOAL: {goal}")
 
 
@@ -146,17 +127,28 @@ def main():
     optimizer = Optimizer(resources, incidence_matrix, ideal_weights)
 
     n = [80,10,10] # Initial Connections
-    sim_length = 100
+    sim_length = 2000
 
+    throughputs = []
     for i in range(sim_length):
         print(f"n: {n}")
         throughput = world_model.tput(n)
+        throughputs.append(throughput)
+        print(throughput)
         n = optimizer.update(throughput, n)
 
-        print("ROUND RESULTS")
-        print(throughput)
-        print(n)
+    # Display the throughputs as three separate lines on a curve
+    # As well as the GOAL throughputs as horizontal lines
+    import matplotlib.pyplot as plt
+    plt.plot(throughputs)
+    
+    # Plot horizontal line at y=9 
+    print(goal)
+    plt.axhline(y=goal[0], color='r', linestyle='-', label='A Goal')
+    plt.axhline(y=goal[1], color='r', linestyle='-', label='B Goal')
+    # plt.axhline(y=goal[2], color='r', linestyle='-', label='C Goal')
 
+    plt.show()
 
 if __name__ == "__main__":
     main()
